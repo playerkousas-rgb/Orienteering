@@ -44,8 +44,8 @@ type ScoreRecord = {
 
 type AppSettings = { centerPassword: string; cpPassword: string; superPassword: string; eventCode: string }
 
-const SUPER_PASSWORD = '07281201'
-const DEFAULT_SETTINGS: AppSettings = { centerPassword: '', cpPassword: '', superPassword: SUPER_PASSWORD, eventCode: '' }
+const SUPER_PASSWORD_HASH = '1K4V4BU'
+const DEFAULT_SETTINGS: AppSettings = { centerPassword: '', cpPassword: '', superPassword: '', eventCode: '' }
 const STORAGE_KEY = 'scout-orienteering-player-state'
 const SCORE_KEY = 'scout-orienteering-admin-scoreboard'
 const SETTINGS_KEY = 'scout-orienteering-settings'
@@ -67,6 +67,10 @@ function getEventSecret() {
 
 function getEventId() {
   return stableHash(`EVENT|${getSettings().eventCode || 'UNCONFIGURED'}`).slice(0, 8)
+}
+
+function verifySuperPassword(password: string) {
+  return stableHash(password) === SUPER_PASSWORD_HASH
 }
 
 function isConfigured() {
@@ -316,9 +320,11 @@ function PlayerApp() {
 function AdminApp({ role }: { role: 'center' | 'cp' }) {
   const authKey = role === 'center' ? 'scout-center-authed' : 'scout-cp-admin-authed'
   const isCenter = role === 'center'
-  const [settings] = useLocalState<AppSettings>(SETTINGS_KEY, getSettings())
+  const [settings, setSettings] = useLocalState<AppSettings>(SETTINGS_KEY, getSettings())
   const [authed, setAuthed] = useState(localStorage.getItem(authKey) === 'yes')
   const [password, setPassword] = useState('')
+  const [lockPassword, setLockPassword] = useState('')
+  const [settingsText, setSettingsText] = useState('')
   const [cpNo, setCpNo] = useState('A01')
   const [cpScore, setCpScore] = useState(10)
   const [cpList, setCpList] = useState<Array<CheckpointPayload & { image: string }>>([])
@@ -334,8 +340,28 @@ function AdminApp({ role }: { role: 'center' | 'cp' }) {
   const fileRef = useRef<HTMLInputElement | null>(null)
   const ranked = useMemo(() => [...scores].sort((a, b) => b.total - a.total || a.scannedAt.localeCompare(b.scannedAt)), [scores])
 
+  function importLockedSettings(raw: string) {
+    const payload = safeParse<{ type: string; settings: AppSettings; sig: string }>(raw)
+    if (!payload || payload.type !== 'EVENT_SETTINGS' || !payload.settings) {
+      setAdminNotice('設定包格式錯誤。')
+      return
+    }
+    const expected = stableHash(`SETTINGS|${payload.settings.eventCode}|${payload.settings.centerPassword}|${payload.settings.cpPassword}|${lockPassword}`)
+    if (payload.sig !== expected) {
+      setAdminNotice('鎖網頁密碼錯誤，不能套用本次活動設定。')
+      return
+    }
+    setSettings(payload.settings)
+    saveSettings(payload.settings)
+    localStorage.removeItem('scout-center-authed')
+    localStorage.removeItem('scout-cp-admin-authed')
+    setSettingsText('')
+    setLockPassword('')
+    setAdminNotice('已套用本次活動設定，請使用活動負責人提供的後台密碼登入。')
+  }
+
   if (!isConfigured()) {
-    return <SetupRequired />
+    return <SetupRequired settingsText={settingsText} setSettingsText={setSettingsText} lockPassword={lockPassword} setLockPassword={setLockPassword} onImport={importLockedSettings} notice={adminNotice} />
   }
 
   function login() {
@@ -475,8 +501,8 @@ function InfoCard({ title, text }: { title: string; text: string }) {
   return <div className="rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-100"><h3 className="font-black text-slate-950">{title}</h3><p className="mt-2 text-sm leading-6 text-slate-600">{text}</p></div>
 }
 
-function SetupRequired() {
-  return <main className="grid min-h-screen place-items-center bg-[#02133E] p-4"><div className="w-full max-w-lg rounded-[2rem] bg-white p-8 shadow-2xl"><div className="mb-6 grid h-16 w-16 place-items-center rounded-3xl bg-amber-100 text-amber-700"><Lock size={32} /></div><h1 className="text-3xl font-black">系統尚未設定</h1><p className="mt-3 leading-7 text-slate-600">正式使用前，請先進入「系統設定」設定活動代碼、賽事中心密碼及 CP 管理員密碼。未設定前不會使用任何測試密碼或測試活動資料。</p><a href="/super" className="mt-6 block rounded-2xl bg-[#02133E] px-4 py-4 text-center font-black text-white">前往系統設定</a><div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black"><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/">賽員端</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/center">賽事中心</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/admin">CP 管理員</a></div></div></main>
+function SetupRequired({ settingsText, setSettingsText, lockPassword, setLockPassword, onImport, notice }: { settingsText: string; setSettingsText: (value: string) => void; lockPassword: string; setLockPassword: (value: string) => void; onImport: (raw: string) => void; notice: string }) {
+  return <main className="grid min-h-screen place-items-center bg-[#02133E] p-4"><div className="w-full max-w-lg rounded-[2rem] bg-white p-8 shadow-2xl"><div className="mb-6 grid h-16 w-16 place-items-center rounded-3xl bg-amber-100 text-amber-700"><Lock size={32} /></div><h1 className="text-3xl font-black">系統尚未設定</h1><p className="mt-3 leading-7 text-slate-600">正式使用前，請套用本次活動設定。活動負責人會提供「設定包」及「鎖網頁密碼」。只有兩者正確，這台裝置才可登入本次活動後台。</p><div className="mt-5 rounded-3xl bg-slate-50 p-4"><label className="text-sm font-black text-slate-700">貼上本次活動設定包<textarea value={settingsText} onChange={(event) => setSettingsText(event.target.value)} className="mt-2 h-28 w-full rounded-2xl border border-slate-200 p-3 text-xs font-normal" placeholder="貼上 EVENT_SETTINGS 設定包" /></label><label className="mt-3 block text-sm font-black text-slate-700">鎖網頁密碼<input type="password" value={lockPassword} onChange={(event) => setLockPassword(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 p-3 font-normal" placeholder="由活動負責人提供" /></label><button onClick={() => onImport(settingsText.trim())} className="mt-3 w-full rounded-2xl bg-[#02133E] px-4 py-3 font-black text-white">套用活動設定</button></div>{notice && <p className="mt-3 rounded-2xl bg-rose-50 p-3 text-sm font-bold text-rose-700">{notice}</p>}<a href="/super" className="mt-5 block rounded-2xl border border-slate-200 px-4 py-3 text-center font-black text-slate-700">我是系統擁有人：前往系統設定</a><div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black"><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/">賽員端</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/center">賽事中心</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/admin">CP 管理員</a></div></div></main>
 }
 
 function SuperAdminApp() {
@@ -484,12 +510,32 @@ function SuperAdminApp() {
   const [authed, setAuthed] = useState(false)
   const [password, setPassword] = useState('')
   const [notice, setNotice] = useState('')
+  const [lockPassword, setLockPassword] = useState('')
+  const [settingsPackage, setSettingsPackage] = useState('')
 
-  if (!authed) {
-    return <main className="grid min-h-screen place-items-center bg-[#02133E] p-4"><div className="w-full max-w-md rounded-[2rem] bg-white p-8 shadow-2xl"><div className="mb-5 grid grid-cols-2 gap-2 text-center text-xs font-black sm:grid-cols-4"><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/">賽員端</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/center">賽事中心</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/admin">CP 管理員</a><a className="rounded-2xl bg-[#02133E] px-3 py-2 text-white" href="/super">系統設定</a></div><div className="mb-6 grid h-16 w-16 place-items-center rounded-3xl bg-slate-100 text-[#02133E]"><Lock size={32} /></div><h1 className="text-3xl font-black">系統設定</h1><p className="mt-2 text-slate-500">入口可見以免忘記；必須輸入超級管理員密碼才可進入。</p><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && (password === SUPER_PASSWORD ? setAuthed(true) : setNotice('密碼錯誤'))} className="mt-6 w-full rounded-2xl border border-slate-200 p-4 outline-none focus:border-blue-600" placeholder="輸入超級管理員密碼" /><button onClick={() => password === SUPER_PASSWORD ? setAuthed(true) : setNotice('密碼錯誤')} className="mt-4 w-full rounded-2xl bg-[#02133E] p-4 font-black text-white">進入設定</button>{notice && <p className="mt-3 text-sm font-bold text-rose-600">{notice}</p>}</div></main>
+  function createLockedSettingsPackage() {
+    if (!settings.eventCode || !settings.centerPassword || !settings.cpPassword) {
+      setNotice('請先儲存活動代碼、賽事中心密碼及 CP 管理員密碼。')
+      return
+    }
+    if (!lockPassword.trim()) {
+      setNotice('請輸入本次活動的鎖網頁密碼。')
+      return
+    }
+    const payload = {
+      type: 'EVENT_SETTINGS',
+      settings,
+      sig: stableHash(`SETTINGS|${settings.eventCode}|${settings.centerPassword}|${settings.cpPassword}|${lockPassword.trim()}`),
+    }
+    setSettingsPackage(JSON.stringify(payload))
+    setNotice('已產生本次活動設定包。請把設定包及鎖網頁密碼分開交給活動負責人。')
   }
 
-  return <main className="min-h-screen bg-[#02133E] p-4"><div className="mx-auto max-w-2xl rounded-[2rem] bg-white p-6 shadow-2xl sm:p-8"><h1 className="text-3xl font-black">超級管理設定</h1><p className="mt-2 text-slate-500">可更改每次活動的賽事中心密碼、CP 管理員密碼及活動代碼。超級管理員密碼固定由負責人保存，不在介面顯示。</p><SettingsPanel settings={settings} setSettings={setSettings} onSaved={setNotice} />{notice && <p className="mt-4 rounded-2xl bg-blue-50 p-4 text-sm font-bold text-blue-900">{notice}</p>}</div></main>
+  if (!authed) {
+    return <main className="grid min-h-screen place-items-center bg-[#02133E] p-4"><div className="w-full max-w-md rounded-[2rem] bg-white p-8 shadow-2xl"><div className="mb-5 grid grid-cols-2 gap-2 text-center text-xs font-black sm:grid-cols-4"><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/">賽員端</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/center">賽事中心</a><a className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700" href="/admin">CP 管理員</a><a className="rounded-2xl bg-[#02133E] px-3 py-2 text-white" href="/super">系統設定</a></div><div className="mb-6 grid h-16 w-16 place-items-center rounded-3xl bg-slate-100 text-[#02133E]"><Lock size={32} /></div><h1 className="text-3xl font-black">系統設定</h1><p className="mt-2 text-slate-500">入口可見以免忘記；必須輸入超級管理員密碼才可進入。</p><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && (verifySuperPassword(password) ? setAuthed(true) : setNotice('密碼錯誤'))} className="mt-6 w-full rounded-2xl border border-slate-200 p-4 outline-none focus:border-blue-600" placeholder="輸入超級管理員密碼" /><button onClick={() => verifySuperPassword(password) ? setAuthed(true) : setNotice('密碼錯誤')} className="mt-4 w-full rounded-2xl bg-[#02133E] p-4 font-black text-white">進入設定</button>{notice && <p className="mt-3 text-sm font-bold text-rose-600">{notice}</p>}</div></main>
+  }
+
+  return <main className="min-h-screen bg-[#02133E] p-4"><div className="mx-auto max-w-2xl rounded-[2rem] bg-white p-6 shadow-2xl sm:p-8"><h1 className="text-3xl font-black">超級管理設定</h1><p className="mt-2 text-slate-500">你先設定每次活動的後台密碼及活動代碼，再產生「設定包」和「鎖網頁密碼」交給該次活動負責人。下一次活動只要更改鎖網頁密碼/活動代碼，舊工作人員即使記得舊密碼也不能套用新活動後台。</p><SettingsPanel settings={settings} setSettings={setSettings} onSaved={setNotice} /><section className="mt-5 rounded-3xl bg-slate-50 p-4"><h2 className="text-xl font-black">產生活動設定包</h2><p className="mt-2 text-sm leading-6 text-slate-600">設定包可給活動負責人匯入到賽事中心或 CP 管理員裝置。鎖網頁密碼請分開提供，避免設定包被其他人直接套用。</p><input type="password" value={lockPassword} onChange={(event) => setLockPassword(event.target.value)} className="mt-3 w-full rounded-2xl border border-slate-200 p-3" placeholder="輸入本次活動鎖網頁密碼" /><button onClick={createLockedSettingsPackage} className="mt-3 w-full rounded-2xl bg-[#02133E] px-4 py-3 font-black text-white">產生設定包</button>{settingsPackage && <textarea readOnly value={settingsPackage} className="mt-3 h-32 w-full rounded-2xl border border-slate-200 bg-white p-3 text-xs" />}</section>{notice && <p className="mt-4 rounded-2xl bg-blue-50 p-4 text-sm font-bold text-blue-900">{notice}</p>}</div></main>
 }
 
 function SettingsPanel({ settings, setSettings, onSaved }: { settings: AppSettings; setSettings: (settings: AppSettings) => void; onSaved: (message: string) => void }) {
@@ -499,7 +545,7 @@ function SettingsPanel({ settings, setSettings, onSaved }: { settings: AppSettin
     const next = {
       centerPassword: draft.centerPassword.trim(),
       cpPassword: draft.cpPassword.trim(),
-      superPassword: SUPER_PASSWORD,
+      superPassword: '',
       eventCode: draft.eventCode.trim(),
     }
     if (!next.centerPassword || !next.cpPassword || !next.eventCode) {
